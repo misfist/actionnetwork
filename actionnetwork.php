@@ -1,14 +1,14 @@
 <?php
 /*
  * @package ActionNetwork
- * @version 1.0
+ * @version 1.1.1
  *
  * Plugin Name: Action Network
  * Description: Provides Action Network (actionnetwork.org) action embed codes as shortcodes and a calendar and signup widget
  * Author: Jonathan Kissam
  * Text Domain: actionnetwork
  * Domain Path: /languages
- * Version: 1.0
+ * Version: 1.1.1
  * License: GPLv3
  * Author URI: http://jonathankissam.com
  */
@@ -33,7 +33,7 @@ add_option( 'actionnetwork_api_key', null );
  * Installation, database setup
  */
 global $actionnetwork_version;
-$actionnetwork_version = '1.0';
+$actionnetwork_version = '1.1.1';
 global $actionnetwork_db_version;
 $actionnetwork_db_version = '1.0.7';
 
@@ -51,6 +51,13 @@ function actionnetwork_install() {
 	if ($installed_version != $actionnetwork_version) {
 
 		// test for particular updates here
+		if ( ($actionnetwork_version == '1.1.0') || ($actionnetwork_version == '1.1.1') ) {
+			$notices[] = sprintf(
+				/* translators: %s is a link to https://wordpress.org/plugins/wp-action-network/ */
+				__('Welcome to version 1.1 of the %s. This version is chock full of new features, including new widgets, shortcodes, and shortcode options, as well as ajax submission of the signup form.', 'actionnetwork'),
+				'<a href="https://wordpress.org/plugins/wp-action-network/">Action Network plugin</a>'
+				) . ' <a href="https://jonathankissam.wordpress.com/2017/12/27/new-version-of-my-action-network-plugin/" target="_blank">' . __('Read more','actionnetwork') . ' &raquo;</a>';
+		}
 
 		// on first installation
 		if (!$installed_version) {
@@ -199,10 +206,12 @@ add_action( 'admin_notices', 'actionnetwork_admin_notices' );
 /**
  * Widgets
  */
-if (!class_exists('ActionNetwork_Calendar_Widget')) {
+if (!class_exists('ActionNetwork_Action_Widget')) {
 	require_once( plugin_dir_path( __FILE__ ) . 'includes/actionnetwork-widgets.class.php' );
 }
 add_action( 'widgets_init', function(){
+	register_widget( 'ActionNetwork_Action_Widget' );
+	register_widget( 'ActionNetwork_List_Widget' );
 	register_widget( 'ActionNetwork_Calendar_Widget' );
 	register_widget( 'ActionNetwork_Signup_Widget' );
 });
@@ -228,6 +237,11 @@ function actionnetwork_shortcode( $atts ) {
 	$id = isset($atts['id']) ? (int) $atts['id'] : null;
 	$size = isset($atts['size']) ? $atts['size'] : 'standard';
 	$style = isset($atts['style']) ? $atts['style'] : 'layout_only';
+	$thank_you = isset($atts['thank_you']) ? $atts['thank_you'] : '';
+	$help_us = isset($atts['help_us']) ? $atts['help_us'] : '';
+	$hide_social = isset($atts['hide_social']) ? $atts['hide_social'] : null;
+	$hide_email = isset($atts['hide_email']) ? $atts['hide_email'] : null;
+	$hide_embed = isset($atts['hide_embed']) ? $atts['hide_embed'] : null;
 
 	if (!$id) { return; }
 
@@ -244,11 +258,127 @@ function actionnetwork_shortcode( $atts ) {
 	
 	if ($output) {
 		$actionnetwork_shortcode_count++;
+		
+		if ($thank_you || $help_us || $hide_social || $hide_email || $hide_embed) {
+			
+			preg_match("/id='([-a-z]+)'/", $output, $matches);
+			$div_id = is_array($matches) && isset($matches[1]) ? $matches[1] : false;
+			
+			if ($div_id) {
+			
+				wp_register_script( 'actionnetwork-customize-action-js', plugins_url('customize-action.js', __FILE__) );
+				$options = array(
+					'thank_you' => $thank_you,
+					'help_us' => $help_us,
+				);
+				if ( $hide_social ) { $options['hide_social'] = true; }
+				if ( $hide_email ) { $options['hide_email'] = true; }
+				if ( $hide_embed ) { $options['hide_embed'] = true; }
+				$actionnetwork_customizations = array(
+					$div_id => $options
+				);
+				wp_localize_script( 'actionnetwork-customize-action-js', 'actionNetworkCustomizations', $actionnetwork_customizations );
+				wp_enqueue_script( 'actionnetwork-customize-action-js', '', array( 'jquery' ), false, true );
+			
+			}
+		}
+		
 		return $output;
 	}
 
 }
 add_shortcode( 'actionnetwork', 'actionnetwork_shortcode' );
+
+/**
+ * Shortcode for action list
+ */
+function actionnetwork_list_shortcode ( $atts, $content = null ) {
+	global $wpdb, $wp;
+	
+	$n = isset($atts['n']) ? (int) $atts['n'] : 5;
+	$action_types = isset($atts['action_types']) ? sanitize_text_field($atts['action_types']) : 'petition,advocacy_campaign,fundraising_page,form';
+	$link_format = isset($atts['link_format']) ? sanitize_text_field($atts['link_format']) : '{{ action.link }}';
+	$link_text = isset($atts['link_text']) ? $atts['link_text'] : '{{ action.title }}';
+	$container_element = isset($atts['container_element']) ? sanitize_key($atts['container_element']) : 'ul';
+	$container_class = isset($atts['container_class']) ? sanitize_html_class($atts['container_class']) : 'actionnetwork-list';
+	$item_element = isset($atts['item_element']) ? sanitize_key($atts['item_element']) : 'li';
+	$item_class = isset($atts['item_class']) ? sanitize_html_class($atts['item_class']) : 'actionnetwork-list-item';
+	$no_actions = isset($atts['no_actions']) ? $atts['no_actions'] : __( 'No current actions', 'actionnetwork' );
+	$no_actions_hide = isset($atts['no_actions_hide']) ? $atts['no_actions_hide'] : false;
+	
+	// template
+	$add_wpautop = false;
+	if (trim($content)) {
+		$content = preg_replace('#</?p>|<br ?/?>#','',$content);
+		$add_wpautop = true;
+	} else {
+		$content = <<<EOHTML
+<$container_element class="$container_class">
+{% for action in actions %}
+  <$item_element class="$item_class">
+    <a href="{{ action.link }}">$link_text</a>
+  </$item_element>
+{% else %}
+  <$item_element class="$item_class">$no_actions</$item_element>
+{% endfor %}
+</$container_element>
+EOHTML;
+	}
+	
+	// parse template into $pre, $row, $else and $post
+	list ($pre,$content) = explode('{% for action in actions %}', $content);
+	list ($row,$content) = explode('{% else %}', $content);
+	list ($no_actions,$post) = explode('{% endfor %}', $content);
+	
+	// load events
+	$action_types = preg_replace('/[^a-z_,]/','',$action_types);
+	$action_types = "'".str_replace(',',"','",$action_types)."'";
+	$sql = "SELECT * FROM {$wpdb->prefix}actionnetwork WHERE type IN ($action_types)";
+	$sql .= " AND enabled=1 AND hidden=0";
+	$sql .= " ORDER BY created_date DESC";
+	if ($n) { $sql .= " LIMIT 0,$n"; }
+	$actions = $wpdb->get_results( $sql, ARRAY_A );
+	
+	// if json="1" attribute is set, render as JSON object
+	if (isset($atts['json']) && $atts['json']) {
+		foreach($actions as $index => $action) {
+			$action['link']= isset($action['browser_url']) ? $action['browser_url'] : site_url();
+			$action['id'] = isset($action['wp_id']) ? $action['wp_id'] : 0;
+			$action['link'] = $link_format ? _actionnetwork_twig_render( $link_format, $action, 'action') : $event['link'];
+			$actions[$index] = $action;
+		}
+		$json = json_encode($events);
+		$output = '<script type="text/javascript">';
+		$output .= "\n";
+		$output .= 'actionNetworkActions = '.$json;
+		$output .= ";\n";
+		$output .= '</script>';
+		return $output;
+	}
+	
+	$output = $pre;
+	if (count($actions)) {
+		foreach ($actions as $action) {
+			$action_data['id'] = isset($action['wp_id']) ? $action['wp_id'] : 0;
+			$action_data['title'] = isset($action['title']) ? $action['title'] : '(Action Title)';
+			$action_data['link'] = isset($action['browser_url']) ? $action['browser_url'] : site_url();
+			$action_data['link'] = $link_format ? _actionnetwork_twig_render( $link_format, $action_data, 'action') : $action_data['link'];
+			$output .= _actionnetwork_twig_render( $row, $action_data, 'action' );
+		}
+	} else {
+		if ( $no_actions_hide ) { return ''; }
+		$output .= $no_actions;
+	}
+	$output .= $post;
+	
+	// $output .= '<pre>' . print_r($wp,1) . '</pre>';
+	
+	if ($add_wpautop) { $output = wpautop($output); }
+	
+	return $output;
+	
+}
+add_shortcode( 'actionnetwork_list', 'actionnetwork_list_shortcode' );
 
 /**
  * Shortcode for calendar
@@ -305,7 +435,7 @@ function actionnetwork_calendar_shortcode ( $atts, $content = null ) {
 <$container_element class="$container_class">
 {% for event in events %}
   <$item_element class="$item_class">
-    <a href="$link_format">$link_text</a>
+    <a href="{{ event.link }}">$link_text</a>
   	$location
   	$description
   </$item_element>
@@ -337,7 +467,7 @@ EOHTML;
 			$event['id'] = isset($event['wp_id']) ? $event['wp_id'] : 0;
 			$location_json = isset($event['location']) ? unserialize( $event['location'] ) : new stdClass();
 			$event['location'] = isset($event['location'])? _actionnetwork_render_location( $event['location'] ) : '';
-			$event['link'] = $link_format ? _actionnetwork_calendar_render( $link_format, $event) : $event['link'];
+			$event['link'] = $link_format ? _actionnetwork_twig_render( $link_format, $event, 'event') : $event['link'];
 			$event['location_json'] = $location_json;
 			$events[$index] = $event;
 		}
@@ -357,10 +487,10 @@ EOHTML;
 			$event_data['title'] = isset($event['title']) ? $event['title'] : '(Event Title)';
 			$event_data['date'] = isset($event['start_date']) ? date($date_format, $event['start_date']) : '(Date)';
 			$event_data['link'] = isset($event['browser_url']) ? $event['browser_url'] : site_url();
-			$event_data['link'] = $link_format ? _actionnetwork_calendar_render( $link_format, $event_data) : $event_data['link'];
+			$event_data['link'] = $link_format ? _actionnetwork_twig_render( $link_format, $event_data, 'event') : $event_data['link'];
 			$event_data['location'] = isset($event['location']) ? _actionnetwork_render_location($event['location']) : '';
 			$event_data['description'] = isset($event['description']) ? $event['description'] : '';
-			$output .= _actionnetwork_calendar_render( $row, $event_data );
+			$output .= _actionnetwork_twig_render( $row, $event_data, 'event' );
 		}
 	} else {
 		$output .= $no_events;
@@ -378,10 +508,10 @@ add_shortcode( 'actionnetwork_calendar', 'actionnetwork_calendar_shortcode' );
  * Helper function for calendar shortcode
  * Renders a very simplistic version of twig (http://twig.sensiolabs.org/)
  */
-function _actionnetwork_calendar_render( $twig, $event ) {
+function _actionnetwork_twig_render( $twig, $event, $object ) {
 	$output = $twig;
 	foreach ($event as $k => $v) {
-		$output = str_replace('{{ event.'.$k.' }}', $v, $output);
+		$output = str_replace('{{ '.$object.'.'.$k.' }}', $v, $output);
 	}
 	return $output;
 }
@@ -764,7 +894,7 @@ function _actionnetwork_admin_handle_actions(){
 				
 				// parse embed code
 				$embed_style_matched = preg_match_all("/<link href='https:\/\/actionnetwork\.org\/css\/style-embed(-whitelabel)?\.css' rel='stylesheet' type='text\/css' \/>/", $embed_code, $embed_style_matches, PREG_SET_ORDER);
-				$embed_script_matched = preg_match_all("|<script src='https://actionnetwork\.org/widgets/v2/([a-z_]+)/([-a-z0-9]+)\?format=js&source=widget(&style=full)?'>|", $embed_code, $embed_script_matches, PREG_SET_ORDER);
+				$embed_script_matched = preg_match_all("|<script src='https://actionnetwork\.org/widgets/v[2-3]/([a-z_]+)/([-a-z0-9]+)\?format=js&source=widget(&style=full)?'>|", $embed_code, $embed_script_matches, PREG_SET_ORDER);
 				$embed_style = $embed_style_matched ? ( isset($embed_style_matches[0][1]) && $embed_style_matches[0][1] ? 'layout_only' : 'default' ) : 'no';
 				$embed_size = isset($embed_script_matches[0][3]) && $embed_script_matches[0][3] ? 'full' : 'standard';
 				$embed_field_name = 'embed_'.$embed_size.'_'.$embed_style.'_styles';
@@ -891,7 +1021,7 @@ EOHTML;
 
 		// parse embed code
 		$embed_style_matched = preg_match_all("/<link href='https:\/\/actionnetwork\.org\/css\/style-embed(-whitelabel)?\.css' rel='stylesheet' type='text\/css' \/>/", $embed_code, $embed_style_matches, PREG_SET_ORDER);
-		$embed_script_matched = preg_match_all("|<script src='https://actionnetwork\.org/widgets/v2/([a-z_]+)/([-a-z0-9]+)\?format=js&source=widget(&style=full)?'>|", $embed_code, $embed_script_matches, PREG_SET_ORDER);
+		$embed_script_matched = preg_match_all("|<script src='https://actionnetwork\.org/widgets/v[2-3]/([a-z_]+)/([-a-z0-9]+)\?format=js&source=widget(&style=full)?'>|", $embed_code, $embed_script_matches, PREG_SET_ORDER);
 
 		$embed_style = $embed_style_matched ? ( isset($embed_style_matches[0][1]) && $embed_style_matches[0][1] ? 'layout_only' : 'default' ) : 'no';
 		$embed_type = isset($embed_script_matches[0][1]) ? $embed_script_matches[0][1] : '';
@@ -1318,41 +1448,133 @@ function actionnetwork_admin_page() {
 function actionnetwork_admin_add_help() {
 	$screen = get_current_screen();
 	
-	$screen->add_help_tab( array(
-		'id'       => 'actionnetwork-help-overview',
-		'title'    => __( 'Overview', 'actionnetwork' ),
-		'content'  => __('
-<ul>
-<li>Create a Wordpress shortcode from any Action Network embed code by using the "Add New Action" tab.</li>
-<li>Manage your saved embed codes using the Wordpress backend. Supports sorting by title, type and last modified date, and provides a search function.</li>
-<li>If you are an <a href="https://actionnetwork.org/partnerships">Action Network Partner</a>, use your API key to sync all of your actions from Action Network to Wordpress by entering it in the "Settings" tab.</li>
-</ul>
-		', 'actionnetwork'),
-	));
+	$help = array(
+		'actionnetwork-help-overview' => array(
+			'title' => __( 'Overview', 'actionnetwork' ),
+			'content' => __('
+Create a Wordpress shortcode from any Action Network embed code by using the "Add New Action" tab.
+
+Manage your saved embed codes using the Wordpress backend. Supports sorting by title, type and last modified date, and provides a search function.
+
+If you are an <a href="https://actionnetwork.org/partnerships">Action Network Partner</a>, use your API key to sync all of your actions from Action Network to Wordpress by entering it in the "Settings" tab.
+			', 'actionnetwork'),
+		),
+		
+		'actionnetwork-help-shortcodes' => array(
+			'title'    => __('Shortcodes and widgets', 'actionnetwork'),
+			'content'  => __('
+This plugin provides three shortcodes and four widgets:
+
+The <code>[actionnetwork]</code> shortcode or Action Network Action widget displays a single Action Network action.
+
+The <code>[actionnetwork_list]</code> shortcode or Action Network List widget displays a list of the titles of your most recently created Action Network actions, linked to those actions\'s URLs on actionnetwork.org
+
+The <code>[actionnetwork_calendar]</code> shortcode or Action Network Calendar widget displays a list of upcoming Action Network events, linked to those actions\'s URLs on actionnetwork.org
+
+The Action Network Signup widget provides a lightweight HTML form, optionally handled via AJAX, which allows site visitors to sign up for your Action Network list without using an Action Network javascript embed (requires API key).
+', 'actionnetwork'),
+		),
+		
+		'actionnetwork-help-shortcode-options' => array(
+			'title'    => __( 'Action options', 'actionnetwork' ),
+			'content'  => __('
+The <code>id</code> attribute is required, to identify the action.
+
+Use the <code>thank_you</code> and <code>help_us</code> options to modify the "Thank You for Your Support" and "help us using sharing tools" messages. Set <code>hide_social</code>, <code>hide_email</code>, or <code>hide_embed</code> options to <code>1</code> to hide specific sharing tools.
+
+Shortcodes for actions synced via the API can take two additional attributes:
+
+The <code>size</code> attribute can be set to <code>full</code> or <code>standard</code> (standard is the default)
+
+The <code>style</code> attribute can be set to <code>default</code>, <code>layout_only</code>, or <code>no</code> (layout_only is the default)', 'actionnetwork'),
+		),
 	
-	$screen->add_help_tab( array(
-		'id'       => 'actionnetwork-help-shortcodes',
-		'title'    => __( 'Shortcode options', 'actionnetwork' ),
-		'content'  => '<p>'.__('Actionnetwork shortcodes for actions synced via the API can take two additional attributes besides the required <strong>id</strong> attribute:', 'actionnetwork') . '</p><ul><li>' . __('The <strong>size</strong> attribute can be set to <strong>full</strong> or <strong>standard</strong> (standard is the default)', 'actionnetwork') . '</li><li>' . __('The <strong>style</strong> attribute can be set to <strong>default</strong>, <strong>layout_only</strong>, or <strong>no</strong> (layout_only is the default)', 'actionnetwork') . '</li></ul>',
-	));
+		'actionnetwork-help-list-options' => array(
+			'title'    => __( 'List options', 'actionnetwork' ),
+			'content'  => __('
+The [actionnetwork_list] shortcode or widgets will display a list of current actions, and can take the following attributes:
+
+<code>n</code>: number of actions to list (defaults to five)
+<code>action_types</code>: comma-separated list of types of actions to display. Defaults to <code>petition,advocacy_campaign,fundraising_page,form</code> (i.e., everything other than <code>event</code> and <code>ticketed_event</code>, which in most use cases would be handled by the <code>[actionnetwork_calendar]</code> shortcode & widgets - but it <em>can</em> handle events and ticketed events).
+<code>link_format</code>: defaults to <code>{{ action.link }}</code> (i.e., the link to the action on actionnetwork.org) but could be modified, using {{ action.link }} or {{ action.id }}, to a custom URL.
+<code>link_text</code>: defaults to <code>{{ action.title }}</code> (i.e., the public title of the action).
+<code>container_element</code>: HTML element to wrap the list in. Defaults to <code>ul</code> to create an unordered list
+<code>container_class</code>: Class to apply to container element. Defaults to <code>actionnetwork-list</code>
+<code>item_element</code>: HTML element that contains each list item. Defaults to <code>li</code>.
+<code>item_class</code>: Class to apply to list item element. Defaults to <code>actionnetwork-list-item</code>
+<code>no_actions</code>: Text to display if there are no current actions. Defaults to "No current actions." Widget version can include HTML.
+<code>no_actions_hide</code>: If set to 1, the shortcode/widget won\'t display at all if there are no current actions (especially useful for widgets)
+<code>json</code>: If set to 1, will output as JSON rather than HTML (it is up to you to write script to use the JSON)', 'actionnetwork'),
+		),
 	
-	$screen->add_help_tab( array(
-		'id'       => 'actionnetwork-help-calendar-shortcode',
-		'title'    => __( 'Calendar shortcode attributes', 'actionnetwork' ),
-		'content'  => '<p>'.__('The [actionnetwork_calendar] shortcode will display a list of upcoming events, and can take the following attributes:', 'actionnetwork') . '</p><ul><li>' . __('The <strong>size</strong> attribute can be set to <strong>full</strong> or <strong>standard</strong> (standard is the default)', 'actionnetwork') . '</li><li>' . __('The <strong>style</strong> attribute can be set to <strong>default</strong>, <strong>layout_only</strong>, or <strong>no</strong> (layout_only is the default)', 'actionnetwork') . '</li></ul>',
-	));
+		'actionnetwork-help-calendar-options' => array(
+			'title'    => __( 'Calendar options', 'actionnetwork' ),
+			'content'  => __('
+The [actionnetwork_calendar] shortcode or widget will display a list of upcoming events, and can take the following attributes:
+			
+<code>n</code>: number of events to list (defaults to all)
+<code>date_format</code>: <a href="https://php.net/date">php date formatter</a> for date. Defaults to <code>F j, Y</code>.
+<code>link_format</code>: defaults to <code>{{ event.link }}</code> (i.e., the link to the event on actionnetwork.org) but could be modified, using {{ event.link }} or {{ event.id }}, to a custom URL.
+<code>link_text</code>: defaults to <code>{{ event.title }}</code> (i.e., the public title of the event).
+<code>container_element</code>: HTML element to wrap the calendar in. Defaults to <code>ul</code> to create an unordered list
+<code>container_class</code>: Class to apply to container element. Defaults to <code>actionnetwork-calendar</code>
+<code>item_element</code>: HTML element that contains each list item. Defaults to <code>li</code>.
+<code>item_class</code>: Class to apply to list item element. Defaults to <code>actionnetwork-calendar-item</code>
+<code>no_events</code>: Text to display if there are no current events. Defaults to "No upcoming events." Widget version can include HTML.
+<code>location</code>: Formatter for event location. Defaults to <code>&lt;div class="actionnetwork-calendar-location"&gt;{{ event.location }}&lt;/div&gt;</code>
+<code>location</code>: Formatter for event description. Defaults to <code>&lt;div class="actionnetwork-calendar-description"&gt;{{ event.description }}&lt;/div&gt;</code>
+<code>embed_style</code>: Embed style to use if the shortcode is displaying a single event. Defaults to <code>embed_standard_layout_only_styles</code>.
+<code>ignore_url_id</code>: By default, the <code>[actionnetwork_calendar]</code> shortcode will display the full embed for a single event if that event\'s id is appended the the URL. If set to 1, this will be overridden.
+<code>json</code>: If set to 1, will output as JSON rather than HTML (it is up to you to write script to use the JSON)', 'actionnetwork'),
+		),
+		
+		'actionnetwork-help-signup-widget' => array(
+			'title'    => __( 'Signup widget', 'actionnetwork' ),
+			'content'  => __('
+The signup widget, provides a lightweight non-Action-Network form which allows users to sign up for your list
+
+The widget controls display checkboxes that allow you to add tags to anyone who signs up via the form (the tags need to be created in your Action Network backend).
+
+If the "submit via <a href="https://en.wikipedia.org/wiki/Ajax_(programming)">AJAX</a>" option is checked, submissions are handled without a full page reload.
+
+The CSS animations for AJAX submission are contained in the <code>signup.css</code> file. If the form is being submitted via ajax, the javascript in <code>signup.js</code> will add the <code>submitting</code> class to the form while it is being submitted and the <code>submitted</code> class when it has been submitted.
+
+The javascript will also trigger custom javascript events on the <code>document</code> element: <code>actionnetwork_signup_submitted</code> when the form is submitted and <code>actionnetwork_signup_complete</code> when the submission is complete.', 'actionnetwork' ),
+		),
 	
-	$screen->add_help_tab( array(
-		'id'       => 'actionnetwork-help-calendar-shortcode-template',
-		'title'    => __( 'Calendar shortcode template', 'actionnetwork' ),
-		'content'  => '<p>'.__('The [actionnetwork_calendar] shortcode can be templated as follows:', 'actionnetwork') . '</p><ul><li>' . __('The <strong>size</strong> attribute can be set to <strong>full</strong> or <strong>standard</strong> (standard is the default)', 'actionnetwork') . '</li><li>' . __('The <strong>style</strong> attribute can be set to <strong>default</strong>, <strong>layout_only</strong>, or <strong>no</strong> (layout_only is the default)', 'actionnetwork') . '</li></ul>',
-	));
+		'actionnetwork-help-shortcode-template' => array(
+			'title'    => __( 'List and calendar shortcode template', 'actionnetwork' ),
+			'content'  => __('
+The [actionnetwork_list] and [actionnetwork_calendar] shortcodes can be templated using a very simplified <a href="http://https//twig.symfony.com/">twig</a>-like format, by placing the template in between the opening and closing shortcodes. It <em>must</em> follow the following structure, because it doesn\'t actually use twig (yet):
+
+<em>your container HTML...</em>
+<code>{% for action in actions %}</code> <em>(for list)</em> OR <code>{% for event in events %}</code> <em>(for calendar)</em>
+  <em>your iterated item HTML...</em>
+<code>{% else %}</code>
+  <em>your "no events" HTML...</em>
+<code>{% endfor %}</code>
+<em>your container-closing HTML...</em>
+
+Twig variables available for <code>[actionnetwork_list]</code> are <code>{{ action.link }}</code>, <code>{{ action.id }}</code> and <code>{{ action.title }}</code>.
+
+Twig variables available for <code>[actionnetwork_calendar]</code> are <code>{{ event.link }}</code>, <code>{{ event.id }}</code>, <code>{{ event.title }}</code>, <code>{{ event.date }}</code>, <code>{{ event.location }}</code>, and <code>{{ event.description }}</code>.
+
+<code>{{ action.link }}</code> and <code>{{ event.link }}</code> are modified by the <code>link_format</code> attribute before being passed to the template. The <code>link_text</code> attribute is irrelevant if a custom template is used.', 'actionnetwork'),
+		),
 	
-	$screen->add_help_tab( array(
-		'id'       => 'actionnetwork-help-ticketed-events',
-		'title'    => __( 'Ticketed Events', 'actionnetwork' ),
-		'content'  => '<p>' . __('Ticketed events are not currently supported by Action Network\'s API, and so this plugin will not sync them. If you want to use a ticketed event, you will need to add the embed code yourself using the "Add New Action" tab.', 'actionnetwork') . '</p>',
-	));
+		'actionnetwork-help-ticketed-events' => array(
+			'title'    => __( 'Ticketed Events', 'actionnetwork' ),
+			'content'  => __('Ticketed events are not currently supported by Action Network\'s API, and so this plugin will not sync them. If you want to use a ticketed event, you will need to add the embed code yourself using the "Add New Action" tab.', 'actionnetwork'),
+		),
+	);
+	
+	foreach($help as $id => $tab) {
+		$screen->add_help_tab( array(
+			'id' => $id,
+			'title' => $tab['title'],
+			'content' => wpautop( $tab['content'] ),
+		));
+	}
 	
 }
 
